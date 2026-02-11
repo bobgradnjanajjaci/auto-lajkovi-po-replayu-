@@ -4,11 +4,17 @@ import requests
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
-REQUIRED_WORDS = ["encrypted", "money"]
+# Proširene ključne riječi (bolje prepoznavanje)
+REQUIRED_PHRASES = [
+    "encrypted money code",
+    "encryptedmoneycode",
+    "encrypted money",
+    "money code"
+]
 
-REQUEST_TIMEOUT = 6
-MAX_PAGES = 3
-RETRY_COUNT = 1
+REQUEST_TIMEOUT = 7
+MAX_PAGES = 4
+RETRY_COUNT = 2
 RETRY_DELAY = 4
 
 _session = requests.Session()
@@ -18,17 +24,21 @@ def normalize(text: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
+def has_target_phrase(text: str) -> bool:
+    norm = normalize(text)
+    return any(phrase in norm for phrase in REQUIRED_PHRASES)
+
 def expand_url(url: str) -> str:
     if "/video/" in url:
         return url
     try:
         r = _session.head(url, headers=HEADERS, allow_redirects=True, timeout=REQUEST_TIMEOUT)
         return r.url or url
-    except Exception:
+    except:
         try:
             r = _session.get(url, headers=HEADERS, allow_redirects=True, timeout=REQUEST_TIMEOUT)
             return r.url
-        except Exception:
+        except:
             return url
 
 def extract_video_id(url: str):
@@ -55,41 +65,41 @@ def fetch_comments(video_id: str):
 
             if not data.get("has_more"):
                 break
-
             cursor = int(data.get("cursor") or 0)
-
-        except Exception:
+        except:
             break
-
     return comments
 
 def pick_best_comment(comments):
-    visible_comments = comments[:50]
+    """Bira komentar sa najviše replayova koji sadrži ključnu frazu"""
     best = None
+    best_replies = -1
     top_likes = 0
 
-    for c in visible_comments:
+    for c in comments[:60]:   # gledamo prvih 60 komentara
         try:
             text = c.get("text") or ""
             likes = int(c.get("digg_count") or 0)
-            text_norm = normalize(text)
-
+            replies = int(c.get("reply_comment_total") or c.get("reply_count") or 0)
             top_likes = max(top_likes, likes)
 
-            if not all(w in text_norm for w in REQUIRED_WORDS):
+            if not has_target_phrase(text):
                 continue
 
-            best = {
-                "cid": c.get("cid"),
-                "likes": likes,
-                "username": c.get("user", {}).get("unique_id"),
-                "text": text,
-            }
-            break
-        except Exception:
+            # Prioritet = broj replayova (glavni kriterij)
+            if replies > best_replies:
+                best_replies = replies
+                best = {
+                    "cid": c.get("cid"),
+                    "likes": likes,
+                    "replies": replies,
+                    "username": c.get("user", {}).get("unique_id"),
+                    "text": text,
+                }
+        except:
             continue
 
-    return best, top_likes
+    return best, top_likes, best_replies
 
 def build_comment_link(video_url: str, cid: str) -> str:
     base = video_url.split("?")[0]
@@ -106,7 +116,7 @@ def find_target_comment(video_url: str) -> dict:
         comments = fetch_comments(video_id)
 
         if comments:
-            best, top_likes = pick_best_comment(comments)
+            best, top_likes, best_replies = pick_best_comment(comments)
 
             if best:
                 comment_link = build_comment_link(video_url, best["cid"])
@@ -116,6 +126,7 @@ def find_target_comment(video_url: str) -> dict:
                     "comment_link": comment_link,
                     "my_likes": best["likes"],
                     "top_likes": top_likes,
+                    "replies": best_replies,
                     "username": best["username"],
                     "matched_text": best["text"],
                     "attempt": attempt + 1,
